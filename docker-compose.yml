@@ -1,0 +1,93 @@
+# Sobe todo o ambiente com:  docker compose up -d --build
+# Desenvolvimento com caixa de e-mail de teste:  docker compose --profile dev up -d --build
+name: sistema-leads
+
+x-app: &app
+  build: .
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-leads}:${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}@db:5432/${POSTGRES_DB:-leads}
+  volumes:
+    - anexos:/dados/anexos
+  depends_on:
+    db:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-leads}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-leads}
+      TZ: America/Sao_Paulo
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-leads}"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    <<: *app
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/saude')"]
+      interval: 30s
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      api:
+        condition: service_started
+
+  # HTTPS obrigatório. Com DOMINIO=leads.suaempresa.com.br e DNS apontado, o Caddy emite certificado
+  # Let's Encrypt; com DOMINIO=localhost (padrão), usa certificado interno da rede local.
+  proxy:
+    image: caddy:2-alpine
+    environment:
+      DOMINIO: ${DOMINIO:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # Backup diário do banco e dos anexos, com retenção de 30 dias (BACKUP_RETENCAO_DIAS).
+  backup:
+    image: postgres:16-alpine
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:-leads}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-leads}
+      BACKUP_HORA: ${BACKUP_HORA:-02}
+      BACKUP_RETENCAO_DIAS: ${BACKUP_RETENCAO_DIAS:-30}
+      TZ: America/Sao_Paulo
+    volumes:
+      - ./infra/backup.sh:/backup.sh:ro
+      - ${BACKUP_DIR:-./backups}:/backups
+      - anexos:/dados/anexos:ro
+    entrypoint: ["sh", "/backup.sh", "agendado"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Somente desenvolvimento: captura os e-mails enviados (http://localhost:8025).
+  mailpit:
+    image: axllent/mailpit:v1.21
+    profiles: ["dev"]
+    ports:
+      - "8025:8025"
+
+volumes:
+  pgdata:
+  anexos:
+  caddy_data:

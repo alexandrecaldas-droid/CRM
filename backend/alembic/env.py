@@ -1,0 +1,26 @@
+from logging.config import fileConfig
+
+from alembic import context
+from app import models  # noqa: F401  (registra as tabelas)
+from app.db import Base, engine
+
+config = context.config
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+target_metadata = Base.metadata
+
+
+def incluir(obj, nome, tipo, refletido, comparado) -> bool:
+    # Índices trigram são criados por SQL na migração 0002 e não existem nos modelos.
+    return not (tipo == "index" and nome and nome.endswith("_trgm"))
+
+
+def run_migrations_online() -> None:
+    with engine().connect() as connection:
+        context.configure(connection=connection, target_metadata=target_metadata, compare_type=True, include_object=incluir,
+                          render_as_batch=connection.dialect.name == "sqlite")
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+run_migrations_online()
